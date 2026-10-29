@@ -45,7 +45,10 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --gid 1001 worker
+# BusyBox adduser (Alpine) has NO --gid option (deploy log: "unrecognized
+# option: gid"). --uid IS accepted (the app image uses it successfully);
+# group membership uses the documented -G flag instead.
+RUN adduser --system --uid 1001 -G nodejs worker
 
 # Cap the worker's V8 heap below its 320 MB container limit (same policy
 # as the app: GC fights for memory instead of the OOM killer).
