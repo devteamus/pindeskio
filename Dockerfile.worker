@@ -1,0 +1,75 @@
+# ═══════════════════════════════════════════════════════
+# Pin Desk — Worker Dockerfile (Background Pin Publisher)
+#
+# Runs on Node.js (NOT Bun) on purpose: the app Dockerfile documents that
+# Bun crashes on some VPS CPUs — a crash-looping worker means ZERO pins get
+# published, so both containers use the same proven node:20-alpine runtime.
+# The worker entry is TypeScript; tsx (already a project dependency) runs
+# it directly, and the whole worker module tree is exercised under Node by
+# the vitest suite (dispatcher/publisher/e2e), so the runtime is the one
+# the tests actually verified.
+# ═══════════════════════════════════════════════════════
+
+# ---- Stage 1: Dependencies ----
+FROM node:20-alpine AS deps
+WORKDIR /app
+
+# package-lock.json pins the SAME dependency versions as the app image.
+# NODE_ENV=development so devDependencies install too (needed for the
+# prisma generate in the next stage; also matches how the app builds).
+COPY package.json package-lock.json* ./
+ENV NODE_ENV=development
+RUN if [ -f package-lock.json ]; then npm ci --include=dev; else npm install --include=dev; fi
+
+# ---- Stage 2: Build (generate Prisma client) ----
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+# Copy prisma schema
+COPY prisma ./prisma/
+
+# Copy worker code
+COPY worker/ ./worker/
+
+# Copy root package.json for dependencies
+COPY package.json package-lock.json* ./
+COPY --from=deps /app/node_modules ./node_modules/
+
+# Generate Prisma client (needs schema present)
+RUN npx prisma generate
+
+# ---- Stage 3: Production ----
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --gid 1001 worker
+
+# Cap the worker's V8 heap below its 320 MB container limit (same policy
+# as the app: GC fights for memory instead of the OOM killer).
+ENV NODE_OPTIONS="--max-old-space-size=224"
+
+# Copy Prisma schema
+COPY --from=builder --chown=worker:nodejs /app/prisma ./prisma
+
+# Copy worker code
+COPY --from=builder --chown=worker:nodejs /app/worker ./worker
+
+# Copy node_modules (prisma CLI, tsx, @prisma/client, bullmq, ioredis)
+COPY --from=builder --chown=worker:nodejs /app/node_modules ./node_modules
+
+# Copy root package.json (npx resolves tsx/prisma from here)
+COPY --from=builder --chown=worker:nodejs /app/package.json ./package.json
+
+# Make sure the entrypoint is executable
+RUN chmod +x ./worker/entrypoint.sh
+
+USER worker
+
+EXPOSE 3001
+
+# Runtime entrypoint: prisma generate (safety net) → start worker
+WORKDIR /app/worker
+CMD ["sh", "./entrypoint.sh"]

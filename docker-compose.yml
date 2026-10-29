@@ -1,0 +1,223 @@
+# ═══════════════════════════════════════════════════════════════
+# Pin Desk — Production Docker Compose (2 GB stack budget)
+# ═══════════════════════════════════════════════════════════════
+# Usage:
+#   1. Copy .env.example to .env and fill in ALL values
+#   2. docker compose up -d
+#   3. Visit http://localhost:3000
+#
+# RESOURCE BUDGET (hard limits — VPS must stay within 2 GB for this stack):
+#   app       640 MB  (Node heap capped at 384 MB via NODE_OPTIONS)
+#   worker    320 MB  (single replica, WORKER_CONCURRENCY=25)
+#   postgres  384 MB  (shared_buffers=128MB, max_connections=60)
+#   redis     576 MB  (maxmemory=384mb + AOF rewrite fork headroom)
+#   ────────────────────────────────
+#   TOTAL    1920 MB  < 2 GB budget, with ~128 MB slack
+#
+# Expected STEADY-STATE usage is far below the limits (~1.1-1.3 GB);
+# the limits exist so a runaway process can never eat the VPS.
+#
+# SCALE-UP NOTE: this file intentionally runs ONE worker replica. The
+# previous 3-replica setup (~+400 MB) only fits a bigger budget. To
+# re-scale on a larger VPS, re-add `worker-2`/`worker-3` services using
+# the `worker` service as a template (per-account Redis locks, the
+# purge lock, and the idempotent reconciler already make multi-replica
+# safe) and keep (DB_POOL_SIZE + replicas × WORKER_DB_POOL) below
+# Postgres max_connections.
+# ═══════════════════════════════════════════════════════════════
+
+# Default log rotation for all services below (override per-service if needed)
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ─── PostgreSQL ─────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    # max_connections=60 is a hard RAM guard: the app pool (10) + worker
+    # pool (15) use ~25; 60 leaves headroom for migrations/psql while
+    # capping per-connection memory (~5-10 MB each) inside 384 MB.
+    # shared_buffers=128MB is the right size for this budget/dataset.
+    command:
+      [
+        "postgres",
+        "-c", "shared_buffers=128MB",
+        "-c", "max_connections=60",
+      ]
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-pindesk}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      - POSTGRES_DB=${POSTGRES_DB:-pindesk}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: "1"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pindesk} -d ${POSTGRES_DB:-pindesk}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis (BullMQ job queue + per-account publish locks) ─
+  # maxmemory + noeviction: when Redis hits the cap, new job writes fail
+  # LOUDLY (visible upload errors + reconciler re-enqueue) instead of
+  # BullMQ silently evicting delayed jobs = silently losing pins.
+  # 384mb holds ~300k+ pending pin jobs (~1.2KB each) — enough for the
+  # 100-user / 5k-account target; raise it (and the memory limit to
+  # ~1.5× the cap for AOF rewrite headroom) only on a bigger VPS.
+  redis:
+    image: redis:7-alpine
+    command:
+      [
+        "redis-server",
+        "--appendonly", "yes",
+        "--maxmemory", "${REDIS_MAXMEMORY:-384mb}",
+        "--maxmemory-policy", "noeviction",
+      ]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 576M
+          cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Next.js App ───────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    # No host port: Coolify's proxy (Traefik) reaches the container on 3000 via the domain you
+    # set on this service. Publishing a host port would expose the app on http://VPS-IP:3000
+    # bypassing HTTPS/proxy. For plain `docker compose up` locally, add: ports: ["3000:3000"]
+    expose:
+      - "3000"
+    environment:
+      - NODE_ENV=production
+      # Cap the V8 heap below the container limit so the GC fights for
+      # memory instead of the kernel OOM-killer taking the whole container
+      # down mid-request. 384 MB heap + native/SSR buffers fits 640 MB.
+      - NODE_OPTIONS=--max-old-space-size=384
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-pindesk}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-pindesk}
+      - REDIS_URL=redis://redis:6379
+      - SESSION_SECRET=${SESSION_SECRET}
+      - TRON_WALLET_ADDRESS=${TRON_WALLET_ADDRESS}
+      - TRONSCAN_API_KEY=${TRONSCAN_API_KEY:-}
+      - BINANCE_PAY_ID=${BINANCE_PAY_ID}
+      - PINTEREST_APP_ID=${PINTEREST_APP_ID}
+      - PINTEREST_APP_SECRET=${PINTEREST_APP_SECRET}
+      - PINTEREST_API_BASE=${PINTEREST_API_BASE:-https://api.pinterest.com/v5}
+      - PINTEREST_REDIRECT_URI=${PINTEREST_REDIRECT_URI}
+      - BASIC_AUTH_USER=${BASIC_AUTH_USER:-}
+      - BASIC_AUTH_PASS=${BASIC_AUTH_PASS:-}
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - RESEND_API_KEY=${RESEND_API_KEY}
+      - EMAIL_FROM=${EMAIL_FROM:-Pin Desk <noreply@pindesk.xyz>}
+      - APP_URL=${APP_URL:-}
+      # Prisma pool for the web app (keep app + workers below Postgres max_connections)
+      - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
+      # Number of reverse proxies in front of the app (Coolify/Traefik = 1, Cloudflare + Traefik = 2).
+      # Used to read the real client IP for rate limiting.
+      - TRUSTED_PROXY_COUNT=${TRUSTED_PROXY_COUNT:-1}
+      # Reject payment TXIDs older than this many hours
+      - PAYMENT_TX_MAX_AGE_HOURS=${PAYMENT_TX_MAX_AGE_HOURS:-48}
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 640M
+          cpus: "1.5"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ─── Pin Worker (BullMQ consumer — background pin publisher) ─
+  # ONE replica within the 2 GB budget (see SCALE-UP NOTE above).
+  # WORKER_CONCURRENCY=25 × ~1-2s per publish ≈ 40k+ pins/hour
+  # capacity — comfortably above the 100-user / 5k-account target.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-pindesk}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-pindesk}
+      - REDIS_URL=redis://redis:6379
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-25}
+      # ── 48-hour scheduling horizon (Postgres = source of truth) ──
+      # Only pins due within the horizon get BullMQ jobs; the dispatcher
+      # (runs every DISPATCH_INTERVAL_MS) claims the rest as they slide in.
+      - SCHEDULING_HORIZON_HOURS=${SCHEDULING_HORIZON_HOURS:-48}
+      - DISPATCH_INTERVAL_MS=${DISPATCH_INTERVAL_MS:-30000}
+      - DISPATCH_BATCH=${DISPATCH_BATCH:-500}
+      - MAX_DISPATCH_PER_CYCLE=${MAX_DISPATCH_PER_CYCLE:-2000}
+      - DISPATCH_SWEEP_CHUNK=${DISPATCH_SWEEP_CHUNK:-500}
+      - MAX_SWEEP_CHUNKS=${MAX_SWEEP_CHUNKS:-4}
+      - DISPATCH_CYCLE_BUDGET_MS=${DISPATCH_CYCLE_BUDGET_MS:-10000}
+      - EARLY_GRACE_MS=${EARLY_GRACE_MS:-60000}
+      # Prisma pool per worker replica (app 10 + worker 15 = 25 << PG max_connections=60)
+      - WORKER_DB_POOL=${WORKER_DB_POOL:-15}
+      - PINTEREST_APP_ID=${PINTEREST_APP_ID}
+      - PINTEREST_APP_SECRET=${PINTEREST_APP_SECRET}
+      - PINTEREST_API_BASE=${PINTEREST_API_BASE:-https://api.pinterest.com/v5}
+      # Data retention — the worker's daily purge job keeps the disk bounded
+      - PIN_RETENTION_DAYS=${PIN_RETENTION_DAYS:-14}
+      - IMPORT_RETENTION_DAYS=${IMPORT_RETENTION_DAYS:-7}
+      - API_LOG_RETENTION_DAYS=${API_LOG_RETENTION_DAYS:-7}
+      - AUDIT_LOG_RETENTION_DAYS=${AUDIT_LOG_RETENTION_DAYS:-60}
+      - DISK_WARN_PERCENT=${DISK_WARN_PERCENT:-80}
+      # Operator-only control endpoints (/trigger, /purge) stay disabled while this is empty
+      - WORKER_CONTROL_TOKEN=${WORKER_CONTROL_TOKEN:-}
+    restart: unless-stopped
+    logging: *default-logging
+    # Give the worker's SIGTERM handler time to close BullMQ/Redis cleanly
+    # (in-flight publishes finish or hand back, Redis connection QUITs).
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 320M
+          cpus: "1.5"
+    depends_on:
+      app:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local

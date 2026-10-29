@@ -1,0 +1,14 @@
+{
+  "name": "pin-desk-worker",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "npx tsx index.ts",
+    "dev": "npx tsx watch index.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.11.1",
+    "bullmq": "^5.34.4",
+    "ioredis": "^5.4.2"
+  }
+}

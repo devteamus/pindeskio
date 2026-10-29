@@ -1,0 +1,60 @@
+# Dependencies (installed during build)
+node_modules
+worker/node_modules
+
+# Build output
+.next
+/out
+/build
+
+# Database files (production uses volume)
+db/
+prisma/db/
+*.db
+*.db-journal
+data/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Git
+.git
+.gitignore
+
+# Debug & logs
+*.log
+dev.log
+server.log
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AI / Dev tools
+.claude
+.z-ai-config
+/skills/
+test
+prompt
+tool-results/
+upload/
+download/
+examples/
+mini-services/
+start.sh
+Caddyfile
+auth-admin.json
+*.png
+*.jpg
+*.jpeg
+worklog.md
+.zscripts/
+next-env.d.ts

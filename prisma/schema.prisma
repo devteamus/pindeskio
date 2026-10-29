@@ -1,0 +1,346 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String    @id @default(cuid())
+  email          String    @unique
+  name           String?
+  passwordHash   String?
+  role           String    @default("user") // user, admin, super_admin
+  status         String    @default("pending") // pending, active, suspended
+  currentPlanId  String?
+  approvedAt     DateTime?
+  disabledAt     DateTime?
+  // Session tokens issued BEFORE this moment are rejected (set on logout and on
+  // password reset) — signed tokens are otherwise valid until they expire (7 days).
+  sessionsValidFrom DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  currentPlan     Plan?           @relation("currentPlan", fields: [currentPlanId], references: [id])
+  connections     PinterestConnection[]
+  subscriptions   Subscription[]
+  importBatches   ImportBatch[]
+  scheduledPins   ScheduledPin[]
+  usageCounters   UsageCounter[]
+  paymentOrders   PaymentOrder[]
+  reviewedPayments PaymentOrder[]  @relation("adminPaymentReview")
+  auditLogs       AuditLog[]      @relation("userAudit")
+  adminAuditLogs  AuditLog[]      @relation("adminAudit")
+  passwordResetOtps PasswordResetOtp[]
+  pinAnalytics    PinAnalyticsDaily[]
+  apiCallLogs     ApiCallLog[]
+}
+
+model PasswordResetOtp {
+  id           String    @id @default(cuid())
+  userId       String
+  // The OTP itself is NEVER stored — only an HMAC hash of it. Even a full
+  // DB dump can't be used to derive the code or reset anyone's password.
+  otpHash      String
+  expiresAt    DateTime
+  consumedAt   DateTime?
+  // Wrong-guess counter — once this hits MAX_OTP_ATTEMPTS (enforced in code)
+  // this OTP is treated as dead, forcing the user to request a new one
+  // instead of allowing unlimited brute-force tries against one code.
+  attempts     Int       @default(0)
+  requestIp    String?
+  createdAt    DateTime  @default(now())
+
+  user         User      @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([expiresAt]) // purge job: delete expired/consumed OTPs
+}
+
+model Plan {
+  id                   String   @id @default(cuid())
+  name                 String
+  maxConnectedAccounts Int      @default(1)
+  monthlyPinQuota      Int      @default(10)
+  dailyPinLimit        Int      @default(10) // HARD LIMIT per account per 24h
+  maxRowsPerImport     Int      @default(50)
+  priceUsd             Float?
+  features             String   @default("[]") // JSON array
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  users                 User[]  @relation("currentPlan")
+  subscriptions         Subscription[]
+  paymentOrders         PaymentOrder[]
+}
+
+model Subscription {
+  id          String    @id @default(cuid())
+  userId      String
+  planId      String
+  status      String    @default("active") // active, expired, canceled
+  startedAt   DateTime  @default(now())
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user        User      @relation(fields: [userId], references: [id])
+  plan        Plan      @relation(fields: [planId], references: [id])
+}
+
+model PinterestConnection {
+  id                       String    @id @default(cuid())
+  userId                   String
+  pinterestAccountId       String?
+  profileName              String?
+  profileImageUrl          String?
+  accessToken              String?
+  refreshToken             String?
+  tokenExpiresAt           DateTime?
+  refreshTokenExpiresAt    DateTime?
+  scopes                   String    @default("[]")
+  status                   String    @default("active") // active, reauth_required, disabled, disconnected
+  lastSyncedAt             DateTime?
+  nickname                 String?
+  disconnectedAt           DateTime?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+
+  user                     User              @relation(fields: [userId], references: [id])
+  boards                   PinterestBoard[]
+  importBatches            ImportBatch[]
+  scheduledPins            ScheduledPin[]
+  pinAnalytics             PinAnalyticsDaily[]
+  apiCallLogs              ApiCallLog[]
+
+  // Dashboard/analytics/OAuth-callback lookups filter by userId on every
+  // page load; also serves the User->connections FK cascade.
+  @@index([userId])
+}
+
+model PinterestBoard {
+  id                      String    @id @default(cuid())
+  connectionId            String
+  pinterestBoardId        String
+  boardName               String
+  boardDescription        String?
+  boardSectionSupported   Boolean   @default(false)
+  isActive                Boolean   @default(true)
+  pinCount                Int       @default(0) // live pin count from Pinterest (updated on board sync)
+  privacy                 String    @default("PUBLIC") // PUBLIC | SECRET
+  syncedAt                DateTime  @default(now())
+
+  connection              PinterestConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  importRows             ImportRow[]
+  scheduledPins           ScheduledPin[]
+}
+
+model ImportBatch {
+  id                String    @id @default(cuid())
+  userId            String
+  connectionId      String
+  originalFileName  String?
+  importMode        String    @default("auto_pacing") // exact_schedule, auto_pacing
+  dailyTarget       Int?
+  totalRows         Int       @default(0)
+  validRows         Int       @default(0)
+  invalidRows       Int       @default(0)
+  queuedRows        Int       @default(0)
+  status            String    @default("pending") // pending, validating, validated, processing, completed, failed
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  user              User              @relation(fields: [userId], references: [id])
+  connection        PinterestConnection @relation(fields: [connectionId], references: [id])
+  rows              ImportRow[]
+  scheduledPins     ScheduledPin[]
+
+  @@index([createdAt])
+}
+
+model ImportRow {
+  id                  String   @id @default(cuid())
+  batchId             String
+  rowNumber           Int
+  imageUrl            String?
+  title               String?
+  description         String?
+  destinationUrl      String?
+  boardInput          String?
+  resolvedBoardId     String?
+  publishAt           DateTime?
+  altText             String?
+  note                String?
+  rowFingerprint      String?
+  validationStatus    String   @default("pending") // pending, valid, invalid
+  validationErrors    String?  // JSON array of errors
+
+  batch               ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  resolvedBoard       PinterestBoard? @relation(fields: [resolvedBoardId], references: [id])
+  scheduledPin        ScheduledPin?
+
+  // FK cascade lookups: without this, deleting an ImportBatch seq-scans the
+  // whole ImportRow table (millions of rows at scale) per batch deleted.
+  @@index([batchId])
+}
+
+model ScheduledPin {
+  id              String    @id @default(cuid())
+  userId          String
+  connectionId    String
+  batchId         String?
+  importRowId     String?   @unique
+  boardId         String?
+  title           String?
+  description     String?
+  destinationUrl  String?
+  imageUrl        String?
+  altText         String?
+  payloadJson     String?   // Full Pinterest API payload
+  scheduledFor    DateTime?
+  status          String    @default("draft") // draft, validated, queued, publishing, published, retry_waiting, failed_final, paused, canceled
+  attemptCount    Int       @default(0)
+  maxRetries      Int       @default(3)
+  // ── 48-hour scheduling horizon (Postgres = source of truth) ──
+  // NULL  → the pin currently has NO known live BullMQ job for its
+  //         scheduledFor and must be (re-)dispatched by the dispatcher.
+  // Set   → a publish job for the current scheduledFor is (or was just)
+  //         enqueued; the dispatcher must not re-enqueue it.
+  // ANY change to scheduledFor (or any transition back into
+  // queued/retry_waiting) MUST set this back to NULL — that is what
+  // makes the pin re-enter the dispatcher's claim query.
+  dispatchedAt    DateTime?
+  // Consecutive Pinterest 429 (rate limit) deferrals — drives exponential
+  // backoff in the worker. Never causes failed_final; resets on any real
+  // outcome (success or non-429 failure).
+  consecutiveRateLimits Int  @default(0)
+  lastError       String?
+  externalPinId   String?
+  publishedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User              @relation(fields: [userId], references: [id])
+  connection      PinterestConnection @relation(fields: [connectionId], references: [id])
+  batch           ImportBatch?      @relation(fields: [batchId], references: [id])
+  importRow       ImportRow?        @relation(fields: [importRowId], references: [id])
+  board           PinterestBoard?   @relation(fields: [boardId], references: [id])
+  analyticsDaily  PinAnalyticsDaily[]
+
+  // ── Performance indexes (CRITICAL at 500k+ pins/day) ──
+  // Without these, every publish does a full-table COUNT (getPublishedCountLast24h),
+  // the reconciler seq-scans, the dashboard listing seq-scans, and the daily
+  // purge job takes forever.
+  @@index([connectionId, status, publishedAt]) // worker: 24h daily-limit count
+  @@index([status, scheduledFor])              // reconciler: due-queued scan
+  @@index([userId, createdAt])                 // dashboard: pin listing + history
+  @@index([batchId])                           // batch status breakdown + FK SetNull on batch delete
+  // Daily purge (final-status pins past retention) and the reconciler's
+  // orphaned-publishing scan both filter on (status, updatedAt).
+  @@index([status, updatedAt])                 // purge: retention delete scan + orphan recovery
+
+  // NOTE: the dispatcher's claim query additionally uses a PARTIAL index
+  //   (scheduledFor) WHERE status IN ('queued','retry_waiting') AND "dispatchedAt" IS NULL
+  // which Prisma cannot express in schema syntax — it is created by raw SQL in
+  // migration 20261027120000_dispatch_horizon (and re-created by prisma db push
+  // guard scripts). It keeps every dispatch cycle OFF the dispatched/published
+  // majority of the table: only pins that actually need a job live in the index.
+}
+
+// ── Pin Analytics ───────────────────────────────────────────────────
+// One row per (published pin, calendar day). Populated by pulling from
+// Pinterest's Pin Analytics API (real accounts) or simulated deterministically
+// (dev/demo connections) — see src/lib/pin-analytics.ts.
+model PinAnalyticsDaily {
+  id             String   @id @default(cuid())
+  userId         String
+  connectionId   String
+  scheduledPinId String
+  date           DateTime // day this row covers, normalized to UTC midnight
+  impressions    Int      @default(0)
+  pinClicks      Int      @default(0)
+  outboundClicks Int      @default(0)
+  saves          Int      @default(0)
+  engagements    Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user           User                @relation(fields: [userId], references: [id])
+  connection     PinterestConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  scheduledPin   ScheduledPin        @relation(fields: [scheduledPinId], references: [id], onDelete: Cascade)
+
+  @@unique([scheduledPinId, date])
+  @@index([userId, date])
+}
+
+// ── API Call Log ────────────────────────────────────────────────────
+// Lightweight counter of outbound Pinterest API calls, used to power the
+// "API Calls" metric on the Analytics tab. Fire-and-forget inserts — never
+// blocks or fails the request that triggered them.
+model ApiCallLog {
+  id           String   @id @default(cuid())
+  userId       String
+  connectionId String?
+  endpoint     String
+  createdAt    DateTime @default(now())
+
+  user         User                 @relation(fields: [userId], references: [id])
+  connection   PinterestConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([createdAt]) // daily purge job: delete logs older than N days
+}
+
+model UsageCounter {
+  id              String   @id @default(cuid())
+  userId          String
+  monthKey        String   // YYYY-MM format
+  publishedCount  Int      @default(0)
+  failedCount     Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user            User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, monthKey])
+}
+
+model PaymentOrder {
+  id                   String    @id @default(cuid())
+  userId               String
+  planId               String
+  amount               Float
+  expectedAmount       Float
+  network              String    @default("TRC20")
+  walletAddress        String?
+  txid                 String?
+  status               String    @default("pending") // pending, verifying, submitted, verified, rejected, failed_verification
+  verifyError          String?
+  reviewedByAdminId    String?
+  reviewedAt           DateTime?
+  adminNotes           String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  user                 User      @relation(fields: [userId], references: [id])
+  plan                 Plan      @relation(fields: [planId], references: [id])
+  reviewedByAdmin      User?     @relation("adminPaymentReview", fields: [reviewedByAdminId], references: [id])
+}
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  actorType    String   // user, admin, system
+  actorId      String?
+  entityType   String?
+  entityId     String?
+  action       String
+  metadataJson String?  // JSON
+  createdAt    DateTime @default(now())
+
+  user         User?    @relation("userAudit", fields: [actorId], references: [id], map: "AuditLog_actorId_user_fkey")
+  admin        User?    @relation("adminAudit", fields: [actorId], references: [id], map: "AuditLog_actorId_admin_fkey")
+
+  @@index([createdAt]) // purge job: bounded audit-trail retention
+}

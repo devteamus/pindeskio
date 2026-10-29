@@ -1,0 +1,85 @@
+# Dependencies
+node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# Build output
+/.next/
+/out/
+/build
+
+# Database files (use volume in production)
+db/
+prisma/db/
+*.db
+*.db-journal
+data/
+
+# Misc
+.DS_Store
+*.pem
+Thumbs.db
+
+# Debug & logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.log
+dev.log
+dev.out.log
+server.log
+
+# Environment (keep .env.example committed)
+.env
+.env.local
+.env.*.local
+
+# Vercel
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+local-*
+
+# IDE / AI tools
+.claude
+.z-ai-config
+.zscripts/
+/skills/
+test
+prompt
+
+# Dev-only files (not needed in production)
+tool-results/
+upload/
+download/
+examples/
+mini-services/
+start.sh
+Caddyfile
+auth-admin.json
+*.png
+*.jpg
+*.jpeg
+
+# Worker dev (production worker/ dir is committed)
+worker/node_modules/
+
+# Security audit / fix notes (not for public repo)
+*FIX_README*.md
+*UPDATE_NOTES*.md
+SECURITY_AUDIT*.md
+worklog.md
+# Local test infrastructure (scripts/test-infra-start.sh uses this dir)
+.test-infra
+
+# Security audit notes (internal — not for public repo)
+SECURITY-REVIEW*.md
+AUDIT-CHANGES.md

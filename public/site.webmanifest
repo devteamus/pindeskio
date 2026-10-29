@@ -1,0 +1,65 @@
+{
+  "name": "Pin Desk — Bulk Pinterest Pin Scheduler",
+  "short_name": "Pin Desk",
+  "description": "Schedule unlimited Pinterest pins in bulk. Official Pinterest API. CSV upload, auto-pacing, multi-account.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#10b981",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "lang": "en",
+  "categories": ["business", "productivity", "social"],
+  "icons": [
+    {
+      "src": "/favicon-16x16.png",
+      "sizes": "16x16",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/favicon-32x32.png",
+      "sizes": "32x32",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/android-chrome-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Dashboard",
+      "short_name": "Dashboard",
+      "description": "Open your Pin Desk dashboard",
+      "url": "/dashboard"
+    },
+    {
+      "name": "Bulk Upload",
+      "short_name": "Upload",
+      "description": "Bulk upload Pinterest pins via CSV",
+      "url": "/dashboard?tab=bulk-upload"
+    }
+  ]
+}
