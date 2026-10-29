@@ -5,7 +5,35 @@ Pinterest accounts / up to ~500k pins per day** on a single 35GB VPS.
 
 ---
 
-## What changed in this update (v8 — 48-hour scheduling horizon: PostgreSQL as source of truth)
+## What changed in this update (v9 — Google Sheet URL import)
+
+**Context: bulk import now accepts TWO sources — CSV file upload (unchanged) and a Google Sheet URL. Both run through the exact same pipeline.**
+
+| # | Change | Why it matters |
+|---|--------|----------------|
+| 1 | **NEW: `POST /api/pins/bulk/google-sheet`** | Users paste a Google Sheet URL instead of uploading a CSV. The server fetches the sheet's CSV export and imports it with identical validation, plan limits (rows/import, monthly quota), board matching, interval scheduling and 48h-horizon enqueueing |
+| 2 | **NEW: SSRF-safe URL handling (`src/lib/google-sheet.ts`)** | The user's URL is only ever PARSED — never fetched. A strictly-validated spreadsheet ID is extracted (host must be `docs.google.com`, path must be `/spreadsheets/d/{id}`, ID regex `[a-zA-Z0-9_-]{10,100}`) and the fetch URL is built by the server itself. Post-redirect responses are verified to still be on Google-owned hosts; a 20s timeout and a 30 MB stream-read byte cap bound the work; private sheets (Google's HTML login wall) are detected and answered with step-by-step sharing instructions |
+| 3 | **REFACTOR: shared pipeline extracted to `src/lib/bulk-import.ts`** | The ~500-line import pipeline moved out of the CSV route so both sources share it verbatim — a rule fixed for one source cannot drift from the other. The CSV route keeps its exact behavior and response shape (all pre-existing tests pass unchanged) |
+| 4 | **SHARED per-user import throttle** | CSV and Google Sheet imports draw from the SAME `bulk-import:<userId>` hourly budget (20/hour) — alternating endpoints cannot extend it (regression-tested) |
+| 5 | **Dashboard UI: import source switcher** | Step 2 of bulk upload now offers "Upload CSV File" / "Google Sheet URL" tabs. The Google Sheet tab shows the exact sharing steps ("Anyone with the link" → Viewer) and the same-column note. The CSV Format Reference (kept, now dual-source) gained a **Sample CSV download** button |
+| 6 | **Import history label** | Sheet imports show up in Recent Imports as `Google Sheet (<id>, tab gid <n>)` so they are distinguishable from file uploads |
+
+**Tests added (`tests/google-sheet-import.test.ts`, 18 tests — vitest, real PostgreSQL + Redis, Google fetch MOCKED):**
+URL allowlist (13 hostile URL shapes incl. userinfo/subdomain/traversal tricks all rejected pre-network);
+happy-path import (rows scheduled, correct tenant/connection); tab gid propagation; invalid-row flagging
+parity with CSV; auth required; cross-tenant connection rejected before any fetch; private-sheet HTML wall →
+sharing instructions; Google 404 → clear 502; non-Google final host → aborted; 30 MB byte cap enforced
+mid-stream; wrong-columns diagnostic; timeout → 502; shared throttle (alternating endpoints still 429).
+**Total suite: 90 tests, all passing.**
+
+**Deploy steps (same as before):** push to GitHub → Coolify redeploys with
+`docker compose up -d --build`. No new env vars, no new migrations — this is a pure
+app-code change. After the deploy, the dashboard's Bulk Upload tab shows the two
+import sources.
+
+---
+
+## What changed in the previous update (v8 — 48-hour scheduling horizon: PostgreSQL as source of truth)
 
 **Context: PostgreSQL is now the source of truth for ALL future scheduled pins; Redis/BullMQ is only the execution queue for the next 48 hours.**
 

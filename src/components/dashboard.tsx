@@ -29,7 +29,7 @@ import {
   Shield, LogOut, Menu, ChevronDown, RefreshCw, Trash2, Pencil, Check, X,
   Clock, AlertCircle, CheckCircle2, XCircle, PauseCircle, PlayCircle,
   Copy, ChevronRight, Loader2, FolderSync, ArrowUpDown, LogIn,
-  BarChart3, Download, Trophy, LayoutGrid
+  BarChart3, Download, Trophy, LayoutGrid, FileSpreadsheet
 } from 'lucide-react'
 
 // ─── Nav Items ───────────────────────────────────────────────────────
@@ -1313,6 +1313,12 @@ function BulkUploadTab({ connections }: { connections: PinterestConnection[] }) 
   const [connectionId, setConnectionId] = useState('')
   const [file, setFile] = useState<File | null>(null)
   const [csvRowCount, setCsvRowCount] = useState<number | null>(null)
+  // Import source: upload a CSV file, or import from a Google Sheet URL.
+  // Both run through the exact same backend pipeline (validation, plan
+  // limits, quotas, scheduling) — only the delivery differs: multipart
+  // file upload vs a server-side fetch of the sheet's CSV export.
+  const [importSource, setImportSource] = useState<'csv' | 'sheet'>('csv')
+  const [sheetUrl, setSheetUrl] = useState('')
   const [importMode, setImportMode] = useState<'exact' | 'auto'>('auto')
   // User picks the exact gap between pins directly now — a number plus a
   // unit (minutes / hours / days) — instead of an auto-calculated pacing
@@ -1422,8 +1428,30 @@ function BulkUploadTab({ connections }: { connections: PinterestConnection[] }) 
   // (not this UI, not the upload route) pushes the overflow to the next day.
   const actualIntervalSec = intervalSec
 
+  // Download a sample pin CSV (matches the CSV Format Reference below).
+  // The same file doubles as a template for the Google Sheet import — the
+  // columns are identical for both sources.
+  const downloadSamplePinsCsv = () => {
+    const csv =
+      'title,description,board_name,image_url,destination_url,publish_at,alt_text\n' +
+      '"My Pin Title","Description here","My Board",https://img.com/1.jpg,https://example.com,2026-11-15T10:00:00Z,"Alt text here"\n' +
+      '"Another Pin","Another desc","My Board",https://img.com/2.jpg,,2026-11-16T14:30:00Z,\n'
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'sample-pins-format.csv'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   const handleUpload = async () => {
-    if (!connectionId || !file) { toast.error('Please select a connection and a CSV file'); return }
+    if (!connectionId) { toast.error('Please select a Pinterest account first'); return }
+    if (importSource === 'csv' && !file) { toast.error('Please select a CSV file'); return }
+    if (importSource === 'sheet' && !sheetUrl.trim()) { toast.error('Please paste your Google Sheet URL'); return }
+    if (importSource === 'sheet' && !/^https:\/\/docs\.google\.com\/spreadsheets\/d\//i.test(sheetUrl.trim())) {
+      toast.error('That does not look like a Google Sheet URL — it should start with https://docs.google.com/spreadsheets/d/')
+      return
+    }
     setUploading(true)
     setResult(null)
     setPreviewRows([])
@@ -1431,14 +1459,29 @@ function BulkUploadTab({ connections }: { connections: PinterestConnection[] }) 
     setAvailableBoards([])
     setDiagnostic(null)
     try {
-      const fd = new FormData()
-      fd.append('file', file)
-      fd.append('connectionId', connectionId)
-      fd.append('importMode', importMode)
-      // Send the exact interval (in seconds) the user chose — the backend
-      // schedules pins linearly using this, no more day-bucketed guessing.
-      fd.append('intervalSeconds', String(intervalSec))
-      const res = await apiFetch('/api/pins/bulk', { method: 'POST', body: fd })
+      // Both sources hit the same backend pipeline and return the identical
+      // response shape — only the transport differs.
+      let res: Response
+      if (importSource === 'csv') {
+        const fd = new FormData()
+        fd.append('file', file!)
+        fd.append('connectionId', connectionId)
+        fd.append('importMode', importMode)
+        // Send the exact interval (in seconds) the user chose — the backend
+        // schedules pins linearly using this, no more day-bucketed guessing.
+        fd.append('intervalSeconds', String(intervalSec))
+        res = await apiFetch('/api/pins/bulk', { method: 'POST', body: fd })
+      } else {
+        res = await apiFetch('/api/pins/bulk/google-sheet', {
+          method: 'POST',
+          body: JSON.stringify({
+            sheetUrl: sheetUrl.trim(),
+            connectionId,
+            importMode,
+            intervalSeconds: intervalSec,
+          }),
+        })
+      }
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Upload failed')
       setResult({
@@ -1458,12 +1501,16 @@ function BulkUploadTab({ connections }: { connections: PinterestConnection[] }) 
       setDiagnostic(data.diagnostic || null)
       toast.success(`Successfully queued ${data.validRows} pins!`)
       useAppStore.getState().triggerRefresh()
-      // Refresh the recent batches list so the new upload shows up immediately
+      // Refresh the recent batches list so the new import shows up immediately
       fetchRecentBatches()
-      // Reset the file input so the user can upload another file
-      setFile(null)
-      setCsvRowCount(null)
-      if (fileRef.current) fileRef.current.value = ''
+      // Reset the inputs so the same data can't be imported twice by accident
+      if (importSource === 'csv') {
+        setFile(null)
+        setCsvRowCount(null)
+        if (fileRef.current) fileRef.current.value = ''
+      } else {
+        setSheetUrl('')
+      }
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Upload failed')
     } finally {
@@ -1651,15 +1698,46 @@ function BulkUploadTab({ connections }: { connections: PinterestConnection[] }) 
           </CardContent>
         </Card>
 
-        {/* Step 2: Upload CSV */}
+        {/* Step 2: Import Source — CSV file upload OR Google Sheet URL.
+            Both go through the identical backend pipeline; the format
+            reference below applies to both. */}
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
               <span className="flex size-6 items-center justify-center rounded-full bg-pin-600 text-white text-xs font-bold">2</span>
-              Upload CSV File
+              Import Source
             </CardTitle>
           </CardHeader>
           <CardContent>
+            {/* Source switcher */}
+            <div className="mb-4 grid grid-cols-2 gap-1 rounded-lg bg-muted p-1">
+              <button
+                type="button"
+                onClick={() => setImportSource('csv')}
+                className={`flex items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                  importSource === 'csv'
+                    ? 'bg-white dark:bg-gray-950 text-pin-700 dark:text-pin-400 shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <Upload className="size-4" />
+                Upload CSV File
+              </button>
+              <button
+                type="button"
+                onClick={() => setImportSource('sheet')}
+                className={`flex items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                  importSource === 'sheet'
+                    ? 'bg-white dark:bg-gray-950 text-pin-700 dark:text-pin-400 shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <FileSpreadsheet className="size-4" />
+                Google Sheet URL
+              </button>
+            </div>
+
+            {importSource === 'csv' ? (
             <div
               onClick={() => fileRef.current?.click()}
               className="flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-muted-foreground/25 p-8 text-center transition-colors hover:border-pin-500/50 hover:bg-pin-50/50 dark:hover:bg-pin-900/10"
@@ -1685,6 +1763,33 @@ function BulkUploadTab({ connections }: { connections: PinterestConnection[] }) 
                 </>
               )}
             </div>
+            ) : (
+            <div className="space-y-3">
+              <div>
+                <Label htmlFor="sheet-url" className="font-medium">Google Sheet URL</Label>
+                <Input
+                  id="sheet-url"
+                  type="url"
+                  autoComplete="off"
+                  placeholder="https://docs.google.com/spreadsheets/d/…"
+                  value={sheetUrl}
+                  onChange={(e) => setSheetUrl(e.target.value)}
+                  className="mt-1.5"
+                />
+              </div>
+              <div className="rounded-md border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-900/10 p-3">
+                <p className="text-xs font-medium text-blue-700 dark:text-blue-400 mb-1">How to share your sheet with the app:</p>
+                <ol className="list-decimal list-inside text-xs text-blue-700 dark:text-blue-400 space-y-0.5">
+                  <li>Open your Google Sheet → <strong>File → Share</strong></li>
+                  <li>Set <strong>General access → "Anyone with the link" → Viewer</strong> (or Share → Publish to web)</li>
+                  <li>Open the <strong>tab (sheet)</strong> you want to import, copy the URL from the address bar, and paste it above</li>
+                </ol>
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  Row 1 must be the header row — the <strong>exact same column format</strong> as the CSV reference below (title, board_name, image_url…). Multiple tabs? The app imports the tab that was open when you copied the URL.
+                </p>
+              </div>
+            </div>
+            )}
             <input ref={fileRef} type="file" accept=".csv" className="hidden" onChange={(e) => { setFile(e.target.files?.[0] || null) }} />
           </CardContent>
         </Card>
@@ -1792,10 +1897,10 @@ function BulkUploadTab({ connections }: { connections: PinterestConnection[] }) 
           </CardContent>
         </Card>
 
-        {/* CSV Format Reference */}
+        {/* CSV / Google Sheet Format Reference */}
         <Collapsible>
           <CollapsibleTrigger className="flex w-full items-center justify-between rounded-lg border px-4 py-3 text-sm font-medium hover:bg-muted/50 transition-colors">
-            <span className="flex items-center gap-2"><FileText className="size-4" /> CSV Format Reference</span>
+            <span className="flex items-center gap-2"><FileText className="size-4" /> CSV / Google Sheet Format Reference</span>
             <ChevronRight className="size-4 transition-transform duration-200 [[data-state=open]>&]:rotate-90" />
           </CollapsibleTrigger>
           <CollapsibleContent>
@@ -1807,17 +1912,32 @@ Another Pin,Another desc,My Board,https://img.com/2.jpg,,2025-01-16T14:30:00Z,`}
                 <p className="mt-2 text-xs text-muted-foreground">
                   <strong>Required columns:</strong> title, board_name, image_url<br />
                   <strong>Optional columns:</strong> description, destination_url, publish_at (ISO 8601, used by Exact Schedule), alt_text<br />
-                  <strong>Board matching:</strong> board_name must match one of your synced Pinterest board names (case-insensitive).
+                  <strong>Board matching:</strong> board_name must match one of your synced Pinterest board names (case-insensitive).<br />
+                  <strong>Google Sheets:</strong> use the exact same columns — header row in row 1, one pin per row.
                 </p>
+                <div className="mt-3 flex items-center justify-between gap-2">
+                  <p className="text-xs text-muted-foreground">Download the sample CSV, use it as a template for your CSV file or Google Sheet.</p>
+                  <Button variant="outline" size="sm" onClick={downloadSamplePinsCsv} className="shrink-0">
+                    <Download className="size-3.5" />
+                    Sample CSV
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           </CollapsibleContent>
         </Collapsible>
 
-        {/* Upload Button */}
-        <Button onClick={handleUpload} disabled={uploading || !connectionId || !file} size="lg" className="w-full bg-pin-600 hover:bg-pin-700 text-white">
-          {uploading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Upload className="mr-2 size-4" />}
-          {uploading ? 'Uploading...' : 'Upload & Schedule Pins'}
+        {/* Import Button — label/inputs adapt to the selected source */}
+        <Button
+          onClick={handleUpload}
+          disabled={uploading || !connectionId || (importSource === 'csv' ? !file : !sheetUrl.trim())}
+          size="lg"
+          className="w-full bg-pin-600 hover:bg-pin-700 text-white"
+        >
+          {uploading
+            ? <Loader2 className="mr-2 size-4 animate-spin" />
+            : importSource === 'sheet' ? <FileSpreadsheet className="mr-2 size-4" /> : <Upload className="mr-2 size-4" />}
+          {uploading ? 'Importing…' : importSource === 'sheet' ? 'Import from Google Sheet & Schedule Pins' : 'Upload & Schedule Pins'}
         </Button>
 
         {/* Results Summary */}
